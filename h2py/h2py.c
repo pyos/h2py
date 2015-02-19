@@ -340,6 +340,15 @@ static PyObject * h2py_server_new(PyTypeObject *type, PyObject *args, PyObject *
     Py_INCREF(cb);
     Py_INCREF(ssl);
 
+    if (ssl != Py_None) {
+#if H2O_USE_ALPN
+        h2o_ssl_register_alpn_protocols(((PySSLContext *) ssl)->ctx, h2o_http2_alpn_protocols);
+#endif
+#if H2O_USE_NPN
+        h2o_ssl_register_npn_protocols(((PySSLContext *) ssl)->ctx, h2o_http2_npn_protocols);
+#endif
+    }
+
     self->data = data;
     self->data->config   = config;
     self->data->context  = context;
