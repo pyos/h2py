@@ -31,8 +31,8 @@ typedef struct {
 
 typedef struct {
     PyObject_HEAD
-    size_t     server_cnt;
-    uv_tcp_t **servers;
+    size_t    server_cnt;
+    uv_tcp_t *servers;
     h2py_data_t *data;
 } H2PyServer;
 
