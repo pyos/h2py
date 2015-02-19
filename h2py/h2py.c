@@ -5,10 +5,6 @@
 #define H2PY_STRING(s) PyUnicode_DecodeUTF8((s).base, (ssize_t) (s).len, "surrogateescape")
 
 
-static PyObject * SSL_CONTEXT_TYPE;
-static PyObject * PYUV_LOOP_TYPE;
-
-
 static void h2py_request_dealloc(H2PyRequest *self)
 {
     Py_XDECREF(self->server);
@@ -315,24 +311,6 @@ static PyObject * h2py_server_new(PyTypeObject *type, PyObject *args, PyObject *
         return NULL;
     }
 
-    if (!PyList_Check(sockets)) {
-        return PyErr_Format(PyExc_TypeError, "expected a list of file descriptors");
-    }
-
-    if (!PyCallable_Check(cb)) {
-        return PyErr_Format(PyExc_TypeError, "callback is not callable");
-    }
-
-    if (!PyObject_IsInstance(ev, PYUV_LOOP_TYPE)) {
-        return PyErr_Format(PyExc_TypeError, "expected `pyuv.Loop`, got `%s`",
-            Py_TYPE(ev)->tp_name);
-    }
-
-    if (ssl != Py_None && !PyObject_IsInstance(ssl, SSL_CONTEXT_TYPE)) {
-        return PyErr_Format(PyExc_TypeError, "expected `ssl.SSLContext` or None, got `%s`",
-            Py_TYPE(ssl)->tp_name);
-    }
-
     H2PyServer *self = (H2PyServer *) type->tp_alloc(type, 0);
 
     if (self == NULL) {
@@ -391,11 +369,6 @@ static PyObject * h2py_server_new(PyTypeObject *type, PyObject *args, PyObject *
         PyObject *socket = PyList_GET_ITEM(sockets, i);
         uv_tcp_t *listener = self->servers + i;
 
-        if (!PyLong_Check(socket)) {
-            Py_DECREF(self);
-            return PyErr_Format(PyExc_TypeError, "file descriptors must be integers");
-        }
-
         if ((r = uv_tcp_init(loop, listener)) != 0) {
             Py_DECREF(self);
             return PyErr_Format(PyExc_ConnectionError, "could not create socket: %s", uv_strerror(r));
@@ -446,7 +419,8 @@ static PyTypeObject H2PyServerType = {
     0,                         /* tp_getattro */
     0,                         /* tp_setattro */
     0,                         /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT,        /* tp_flags */
+    Py_TPFLAGS_DEFAULT |
+    Py_TPFLAGS_BASETYPE,       /* tp_flags */
     NULL,                      /* tp_doc */
     0,                         /* tp_traverse */
     0,                         /* tp_clear */
@@ -473,35 +447,20 @@ static struct PyModuleDef h2pymodule = {
 };
 
 
-PyMODINIT_FUNC PyInit_h2py(void)
+PyMODINIT_FUNC PyInit__unsafe(void)
 {
     if (PyType_Ready(&H2PyServerType)  < 0) return NULL;
     if (PyType_Ready(&H2PyRequestType) < 0) return NULL;
 
-    PyObject *m    = NULL;
-    PyObject *ssl  = NULL;
-    PyObject *pyuv = NULL;
+    PyObject *m = PyModule_Create(&h2pymodule);
 
-    if ((m    = PyModule_Create(&h2pymodule))  == NULL) goto error;
-    if ((ssl  = PyImport_ImportModule("ssl"))  == NULL) goto error;
-    if ((pyuv = PyImport_ImportModule("pyuv")) == NULL) goto error;
-    if ((SSL_CONTEXT_TYPE = PyObject_GetAttrString(ssl,  "SSLContext")) == NULL) goto error;
-    if ((PYUV_LOOP_TYPE   = PyObject_GetAttrString(pyuv, "Loop"))       == NULL) goto error;
-    Py_XDECREF(ssl);
-    Py_XDECREF(pyuv);
+    if (m == NULL) {
+        return NULL;
+    }
 
     Py_INCREF(&H2PyServerType);
     Py_INCREF(&H2PyRequestType);
     PyModule_AddObject(m, "Server",  (PyObject *)&H2PyServerType);
     PyModule_AddObject(m, "Request", (PyObject *)&H2PyRequestType);
-    // This will ensure correct reference counts.
-    PyModule_AddObject(m, "SSLContext", SSL_CONTEXT_TYPE);
-    PyModule_AddObject(m, "EventLoop",  PYUV_LOOP_TYPE);
     return m;
-
-  error:
-    Py_XDECREF(m);
-    Py_XDECREF(ssl);
-    Py_XDECREF(pyuv);
-    return NULL;
 }

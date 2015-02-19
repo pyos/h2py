@@ -24,10 +24,8 @@ loop = aiouv.EventLoop()
 # Sockets need to be created manually.
 sock = socket.socket(socket.AF_INET)
 sock.bind(('', 8000))
-sock.setblocking(False)
-fd = sock.detach()  # We won't need the object, only the descriptor.
 
-def onrequest(req):
+def onrequest(req, loop=None):
     # Request objects have the following attributes:
     #   * method  :: str
     #   * path    :: str
@@ -38,16 +36,17 @@ def onrequest(req):
     #   * headers :: [(str, str)]
     req.respond(200, [('content-length', '9')], 'OK', b'Success!\n')
 
-# First argument: a list of sockets, opened in non-blocking mode and bound
-#   to an interface. ("sockets" means "file descriptors", not "objects".)
-# Second argument: a pyuv (*not* aiouv!) event loop.
-# Third argument: a function to call with each request. A function, not a coroutine!
-#   If you need to do asynchronous operations, spawn an `asyncio.Task` manually.
-#   This is preferable, in fact, as exceptions raised by the callback do not pass
-#   through normal exception machinery (they simply get dumped to stderr.)
-# Fourth argument: an SSL context. Or `None`, if you don't want HTTPS.
-# Fifth argument: backlog size, defaults to 128.
-srv = h2py.Server([fd], loop._loop, onrequest, None, 128)
+#  * `sockets`: a list of sockets, opened in non-blocking mode and bound
+#    to an interface. Either socket objects or `int` file descriptors are OK.
+#  * `callback`: a function to call with each request.
+#    If the provided event loop was an `aiouv.EventLoop`, this can be a coroutine.
+#    It must also accept a keyword argument named `loop`, though.
+#  * `loop`: a `pyuv` or `aiouv` event loop. If no provided, the default asyncio loop
+#    is used (which, hopefully, is an `aiouv` loop. Otherwise, `TypeError` is raised.)
+#  * `ssl`: either `None` for HTTP or an `ssl.SSLContext` for HTTPS.
+#  * `backlog`: see `socket.accept`. Defaults to 128.
+#
+srv = h2py.Server([sock], onrequest, loop)
 
 try:
     loop.run_forever()

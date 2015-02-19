@@ -8,7 +8,9 @@ setup(
     author='pyos',
     author_email='pyos100500@gmail.com',
     url='https://github.com/pyos/h2py',
+    packages=['h2py'],
+    package_dir={'h2py': 'h2py'},
     ext_modules=[
-        Extension('h2py', ['h2py.c'], libraries=['h2o', 'ssl', 'uv'])
+        Extension('h2py._unsafe', ['h2py/h2py.c'], libraries=['h2o', 'ssl', 'uv'])
     ]
 )
