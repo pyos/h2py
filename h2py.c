@@ -390,7 +390,6 @@ static PyObject * h2py_server_new(PyTypeObject *type, PyObject *args, PyObject *
     for (i = 0; i < sz; ++i) {
         PyObject *socket = PyList_GET_ITEM(sockets, i);
         uv_tcp_t *listener = self->servers + i;
-        listener->data = (void *) self->data;
 
         if (!PyLong_Check(socket)) {
             Py_DECREF(self);
@@ -408,6 +407,8 @@ static PyObject * h2py_server_new(PyTypeObject *type, PyObject *args, PyObject *
             Py_DECREF(self);
             return PyErr_Format(PyExc_ConnectionError, "could not reopen fd %lu: %s", fd, uv_strerror(r));
         }
+
+        listener->data = (void *) self->data;
 
         if ((r = uv_listen((uv_stream_t *)listener, backlog, on_connect)) != 0) {
             Py_DECREF(self);
