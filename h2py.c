@@ -5,6 +5,10 @@
 #define H2PY_STRING(s) PyUnicode_DecodeUTF8((s).base, (ssize_t) (s).len, "surrogateescape")
 
 
+static PyObject * SSL_CONTEXT_TYPE;
+static PyObject * PYUV_LOOP_TYPE;
+
+
 static void h2py_request_dealloc(H2PyRequest *self)
 {
     Py_XDECREF(self->server);
@@ -319,8 +323,15 @@ static PyObject * h2py_server_new(PyTypeObject *type, PyObject *args, PyObject *
         return PyErr_Format(PyExc_TypeError, "callback is not callable");
     }
 
-    // TODO typecheck `ev` (must be `pyuv.Loop`)
-    // TODO typecheck `ssl` (must be `ssl.SSLContext`)
+    if (!PyObject_IsInstance(ev, PYUV_LOOP_TYPE)) {
+        return PyErr_Format(PyExc_TypeError, "expected `pyuv.Loop`, got `%s`",
+            Py_TYPE(ev)->tp_name);
+    }
+
+    if (ssl != Py_None && !PyObject_IsInstance(ssl, SSL_CONTEXT_TYPE)) {
+        return PyErr_Format(PyExc_TypeError, "expected `ssl.SSLContext` or None, got `%s`",
+            Py_TYPE(ssl)->tp_name);
+    }
 
     H2PyServer *self = (H2PyServer *) type->tp_alloc(type, 0);
 
@@ -466,15 +477,30 @@ PyMODINIT_FUNC PyInit_h2py(void)
     if (PyType_Ready(&H2PyServerType)  < 0) return NULL;
     if (PyType_Ready(&H2PyRequestType) < 0) return NULL;
 
-    PyObject *m = PyModule_Create(&h2pymodule);
+    PyObject *m    = NULL;
+    PyObject *ssl  = NULL;
+    PyObject *pyuv = NULL;
 
-    if (m == NULL) {
-        return NULL;
-    }
+    if ((m    = PyModule_Create(&h2pymodule))  == NULL) goto error;
+    if ((ssl  = PyImport_ImportModule("ssl"))  == NULL) goto error;
+    if ((pyuv = PyImport_ImportModule("pyuv")) == NULL) goto error;
+    if ((SSL_CONTEXT_TYPE = PyObject_GetAttrString(ssl,  "SSLContext")) == NULL) goto error;
+    if ((PYUV_LOOP_TYPE   = PyObject_GetAttrString(pyuv, "Loop"))       == NULL) goto error;
+    Py_XDECREF(ssl);
+    Py_XDECREF(pyuv);
 
     Py_INCREF(&H2PyServerType);
     Py_INCREF(&H2PyRequestType);
     PyModule_AddObject(m, "Server",  (PyObject *)&H2PyServerType);
     PyModule_AddObject(m, "Request", (PyObject *)&H2PyRequestType);
+    // This will ensure correct reference counts.
+    PyModule_AddObject(m, "SSLContext", SSL_CONTEXT_TYPE);
+    PyModule_AddObject(m, "EventLoop",  PYUV_LOOP_TYPE);
     return m;
+
+  error:
+    Py_XDECREF(m);
+    Py_XDECREF(ssl);
+    Py_XDECREF(pyuv);
+    return NULL;
 }

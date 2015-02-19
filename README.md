@@ -40,13 +40,12 @@ def onrequest(req):
 
 # First argument: a list of sockets, opened in non-blocking mode and bound
 #   to an interface. ("sockets" means "file descriptors", not "objects".)
-# Second argument: a pyuv (*not* aiouv!) event loop. Be careful not to pass something
-#   different here, as it will segfault the interpreter.
+# Second argument: a pyuv (*not* aiouv!) event loop.
 # Third argument: a function to call with each request. A function, not a coroutine!
 #   If you need to do asynchronous operations, spawn an `asyncio.Task` manually.
 #   This is preferable, in fact, as exceptions raised by the callback do not pass
 #   through normal exception machinery (they simply get dumped to stderr.)
-# Fourth argument: an SSL context. Optional, not supported yet, does nothing.
+# Fourth argument: an SSL context. Or `None`, if you don't want HTTPS.
 # Fifth argument: backlog size, defaults to 128.
 srv = h2py.Server([fd], loop._loop, onrequest, None, 128)
 
