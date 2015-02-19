@@ -253,10 +253,10 @@ static void on_connect(uv_stream_t *server, int status)
     h2o_context_t *ctx = extra->context;
     h2o_socket_t *sock = h2o_uv_socket_create((uv_stream_t *)conn, NULL, 0, (uv_close_cb)PyMem_RawFree);
 
-    //if (extra->ssl && extra->ssl != Py_None)
-    //    // TODO SSL
-    //else
-    h2o_http1_accept(ctx, ctx->globalconf->hosts, sock);
+    if (extra->ssl && extra->ssl != Py_None)
+        h2o_accept_ssl(ctx, ctx->globalconf->hosts, sock, ((PySSLContext *) extra->ssl)->ctx);
+    else
+        h2o_http1_accept(ctx, ctx->globalconf->hosts, sock);
 }
 
 
@@ -318,6 +318,9 @@ static PyObject * h2py_server_new(PyTypeObject *type, PyObject *args, PyObject *
     if (!PyCallable_Check(cb)) {
         return PyErr_Format(PyExc_TypeError, "callback is not callable");
     }
+
+    // TODO typecheck `ev` (must be `pyuv.Loop`)
+    // TODO typecheck `ssl` (must be `ssl.SSLContext`)
 
     H2PyServer *self = (H2PyServer *) type->tp_alloc(type, 0);
 

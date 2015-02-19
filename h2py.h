@@ -8,6 +8,8 @@
 #include <h2o/http1.h>
 #include <h2o/http2.h>
 
+#include <openssl/ssl.h>
+
 
 typedef struct {
     // This is a description of `pyuv.Loop` objects.
@@ -18,6 +20,14 @@ typedef struct {
     uv_loop_t loop_struct;
     uv_loop_t *uv_loop;
 } PyUV_Loop;
+
+
+typedef struct {
+    // Same story with PySSLContext objects.
+    // https://hg.python.org/cpython/file/70a55b2dee71/Modules/_ssl.c#l184
+    PyObject_HEAD
+    SSL_CTX *ctx;
+} PySSLContext;
 
 
 typedef struct {
