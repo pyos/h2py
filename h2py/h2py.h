@@ -45,7 +45,6 @@ typedef struct {
     PyObject_HEAD
     H2PyServer *server;
     h2o_req_t  *request;
-    int handled;
 } H2PyRequest;
 
 

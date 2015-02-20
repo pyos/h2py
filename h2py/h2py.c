@@ -9,7 +9,6 @@ static PyObject * h2py_request_alloc(H2PyServer *parent, h2o_req_t *lowlevel)
         Py_INCREF(parent);
         self->server  = parent;
         self->request = lowlevel;
-        self->handled = 0;
     }
 
     return (PyObject *) self;
@@ -18,16 +17,24 @@ static PyObject * h2py_request_alloc(H2PyServer *parent, h2o_req_t *lowlevel)
 
 static void h2py_request_dealloc(H2PyRequest *self)
 {
+    if (self->request && self->server->listeners.size != 0) {
+        // Server still online, but no response was sent.
+        h2o_send_error(self->request, 500, "Internal Server Error", "No response", 0);
+    }
+
     Py_DECREF(self->server);
     Py_TYPE(self)->tp_free(self);
 }
 
 
+#define H2PY_ENSURE_REQUEST_USABLE(self) \
+    do { if (self->request == NULL) \
+        return PyErr_Format(PyExc_RuntimeError, "can't access request after response is sent"); } while(0)
+
+
 static PyObject * h2py_request_respond(H2PyRequest *self, PyObject *args)
 {
-    if (self->handled) {
-        return PyErr_Format(PyExc_RuntimeError, "called `respond` twice");
-    }
+    H2PY_ENSURE_REQUEST_USABLE(self);
 
     if (self->server->listeners.size == 0) {
         return PyErr_Format(PyExc_ConnectionError, "server already closed");
@@ -72,43 +79,59 @@ static PyObject * h2py_request_respond(H2PyRequest *self, PyObject *args)
     }
 
     h2o_send_inline(self->request, payload.base, payload.len);
-    self->handled = 1;
+    // Once a response is sent, the stream is free for new requests. H2O can only
+    // store a single request at a time, however, so this struct is now unsafe to use.
+    self->request = NULL;
     Py_RETURN_NONE;
 }
 
 
 static PyObject * h2py_request_get_method(H2PyRequest *self, void *closure)
 {
+    H2PY_ENSURE_REQUEST_USABLE(self);
     return Py_BuildValue("s#", self->request->method.base, self->request->method.len);
 }
 
 
 static PyObject * h2py_request_get_path(H2PyRequest *self, void *closure)
 {
+    H2PY_ENSURE_REQUEST_USABLE(self);
     return Py_BuildValue("s#", self->request->path.base, self->request->path.len);
 }
 
 
 static PyObject * h2py_request_get_host(H2PyRequest *self, void *closure)
 {
+    H2PY_ENSURE_REQUEST_USABLE(self);
     return Py_BuildValue("s#", self->request->authority.base, self->request->authority.len);
 }
 
 
 static PyObject * h2py_request_get_upgrade(H2PyRequest *self, void *closure)
 {
+    H2PY_ENSURE_REQUEST_USABLE(self);
     return Py_BuildValue("s#", self->request->upgrade.base, self->request->upgrade.len);
 }
 
 
 static PyObject * h2py_request_get_version(H2PyRequest *self, void *closure)
 {
+    H2PY_ENSURE_REQUEST_USABLE(self);
     return Py_BuildValue("(ii)", self->request->version >> 8, self->request->version & 0xFF);
+}
+
+
+static PyObject * h2py_request_get_payload(H2PyRequest *self, void *closure)
+{
+    H2PY_ENSURE_REQUEST_USABLE(self);
+    return PyBytes_FromStringAndSize(self->request->entity.base, (ssize_t)self->request->entity.len);
 }
 
 
 static PyObject * h2py_request_get_headers(H2PyRequest *self, void *closure)
 {
+    H2PY_ENSURE_REQUEST_USABLE(self);
+
     Py_ssize_t i;
     Py_ssize_t s = self->request->headers.size;
     PyObject *ret = PyList_New(s);
@@ -127,12 +150,6 @@ static PyObject * h2py_request_get_headers(H2PyRequest *self, void *closure)
     }
 
     return ret;
-}
-
-
-static PyObject *h2py_request_get_payload(H2PyRequest *self, void *closure)
-{
-    return PyBytes_FromStringAndSize(self->request->entity.base, (ssize_t)self->request->entity.len);
 }
 
 
