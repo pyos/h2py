@@ -20,6 +20,7 @@ import aiouv
 # h2o only supports two kinds of event loops, libuv and its own one.
 # Of these two, only libuv has asyncio bindings, so...
 loop = aiouv.EventLoop()
+loop.add_signal_handler(2, lambda: exit())
 
 # Sockets need to be created manually.
 sock = socket.socket(socket.AF_INET)
@@ -34,7 +35,7 @@ def onrequest(req, loop=None):
     #   * version :: (int, int) -- (major, minor)
     #   * payload :: bytes
     #   * headers :: [(str, str)]
-    req.respond(200, [('content-length', '9')], 'OK', b'Success!\n')
+    req.respond(200, [('content-type', 'text/plain')], b'Success!\n')
 
 #  * `sockets`: a list of sockets, opened in non-blocking mode and bound
 #    to an interface. Either socket objects or `int` file descriptors are OK.
@@ -51,7 +52,5 @@ srv = h2py.Server([sock], onrequest, loop)
 try:
     loop.run_forever()
 finally:
-    # Stop serving on these sockets. Note that this is technically not guaranteed
-    # to happen until the next iteration of the event loop.
     srv.close()
 ```

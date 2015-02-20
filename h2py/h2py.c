@@ -1,34 +1,42 @@
 #include "h2py.h"
 
-#define H2PY_RETURN(req) Py_INCREF(req); return (PyObject *)(req);
-#define H2PY_STRING_IS(attr, name) if (PyUnicode_CompareWithASCIIString(attr, name) == 0)
-#define H2PY_STRING(s) PyUnicode_DecodeUTF8((s).base, (ssize_t) (s).len, "surrogateescape")
+
+static PyObject * h2py_request_alloc(H2PyServer *parent, h2o_req_t *lowlevel)
+{
+    H2PyRequest *self = PyObject_New(H2PyRequest, &H2PyRequestType);
+
+    if (self != NULL) {
+        Py_INCREF(parent);
+        self->server  = parent;
+        self->request = lowlevel;
+        self->handled = 0;
+    }
+
+    return (PyObject *) self;
+}
 
 
 static void h2py_request_dealloc(H2PyRequest *self)
 {
-    Py_XDECREF(self->server);
-    self->server = NULL;
+    Py_DECREF(self->server);
     Py_TYPE(self)->tp_free(self);
 }
 
 
 static PyObject * h2py_request_respond(H2PyRequest *self, PyObject *args)
 {
-    if (self->started) {
-        return PyErr_Format(PyExc_ValueError, "called `respond` twice");
+    if (self->handled) {
+        return PyErr_Format(PyExc_RuntimeError, "called `respond` twice");
     }
 
-    if (self->server == NULL || self->server->server_cnt == 0) {
+    if (self->server->listeners.size == 0) {
         return PyErr_Format(PyExc_ConnectionError, "server already closed");
     }
 
     PyObject *headers;
-    char *data;
-    int length;
+    h2o_iovec_t payload;
 
-    if (!PyArg_ParseTuple(args, "iOsy#", &self->request->res.status, &headers,
-                                         &self->request->res.reason, &data, &length)) {
+    if (!PyArg_ParseTuple(args, "iOy#", &self->request->res.status, &headers, &payload, &payload.len)) {
         return NULL;
     }
 
@@ -36,117 +44,108 @@ static PyObject * h2py_request_respond(H2PyRequest *self, PyObject *args)
         return PyErr_Format(PyExc_TypeError, "expected a list of (header, value) tuples");
     }
 
+    self->request->res.reason = "Or Something";
+    self->request->res.headers = (h2o_headers_t) { };
+    self->request->res.content_length = payload.len;
+
     Py_ssize_t i = 0;
     Py_ssize_t s = PyList_Size(headers);
 
     for (; i < s; ++i) {
-        PyObject *item = PyList_GET_ITEM(headers, i);
+        h2o_iovec_t key;
+        h2o_iovec_t value;
 
-        if (!PyTuple_Check(item)) {
+        if (!PyArg_ParseTuple(PyList_GET_ITEM(headers, i), "s#s#", &key, &key.len, &value, &value.len)) {
             return PyErr_Format(PyExc_TypeError, "expected a list of (header, value) tuples");
         }
 
-        char *name;
-        char *value;
-        int ln_name;
-        int ln_value;
+        const h2o_token_t *token = h2o_lookup_token(key.base, key.len);
 
-        if (!PyArg_ParseTuple(item, "s#s#", &name, &ln_name, &value, &ln_value)) {
+        if (token == NULL) {
+            return PyErr_Format(PyExc_ValueError, "unknown header `%s`", key.base);
+        }
+
+        if (token != H2O_TOKEN_CONTENT_LENGTH) {
+            // Content-Length is pretty much already known anyway.
+            h2o_add_header(&self->request->pool, &self->request->res.headers, token, value.base, value.len);
+        }
+    }
+
+    h2o_send_inline(self->request, payload.base, payload.len);
+    self->handled = 1;
+    Py_RETURN_NONE;
+}
+
+
+static PyObject * h2py_request_get_method(H2PyRequest *self, void *closure)
+{
+    return Py_BuildValue("s#", self->request->method.base, self->request->method.len);
+}
+
+
+static PyObject * h2py_request_get_path(H2PyRequest *self, void *closure)
+{
+    return Py_BuildValue("s#", self->request->path.base, self->request->path.len);
+}
+
+
+static PyObject * h2py_request_get_host(H2PyRequest *self, void *closure)
+{
+    return Py_BuildValue("s#", self->request->authority.base, self->request->authority.len);
+}
+
+
+static PyObject * h2py_request_get_upgrade(H2PyRequest *self, void *closure)
+{
+    return Py_BuildValue("s#", self->request->upgrade.base, self->request->upgrade.len);
+}
+
+
+static PyObject * h2py_request_get_version(H2PyRequest *self, void *closure)
+{
+    return Py_BuildValue("(ii)", self->request->version >> 8, self->request->version & 0xFF);
+}
+
+
+static PyObject * h2py_request_get_headers(H2PyRequest *self, void *closure)
+{
+    Py_ssize_t i;
+    Py_ssize_t s = self->request->headers.size;
+    PyObject *ret = PyList_New(s);
+    h2o_header_t *src = self->request->headers.entries;
+
+    if (ret != NULL) for (i = 0; i < s; ++i, ++src) {
+        PyObject *pair = Py_BuildValue("(s#s#)", src->name->base, src->name->len,
+                                                 src->value.base, src->value.len);
+
+        if (pair == NULL) {
+            Py_DECREF(ret);
             return NULL;
         }
 
-        const h2o_token_t *token = h2o_lookup_token(name, (size_t) ln_name);
-
-        if (token == NULL) {
-            return PyErr_Format(PyExc_ValueError, "unsupported header %s", name);
-        }
-
-        if (token == H2O_TOKEN_CONTENT_LENGTH) {
-            self->request->res.content_length = atoi(value);
-        } else {
-            h2o_add_header(&self->request->pool, &self->request->res.headers, token, value, (size_t) ln_value);
-        }
+        PyList_SET_ITEM(ret, i, pair);
     }
 
-    self->started = 1;
-    h2o_send_inline(self->request, data, (size_t) length);
-    H2PY_RETURN(self);
+    return ret;
 }
 
 
-static PyObject * h2py_request_getattro(H2PyRequest *self, PyObject *name)
+static PyObject *h2py_request_get_payload(H2PyRequest *self, void *closure)
 {
-    if (PyUnicode_Check(name)) {
-        H2PY_STRING_IS(name, "method") {
-            return H2PY_STRING(self->request->method);
-        }
-
-        H2PY_STRING_IS(name, "path") {
-            return H2PY_STRING(self->request->path);
-        }
-
-        H2PY_STRING_IS(name, "host") {
-            return H2PY_STRING(self->request->authority);
-        }
-
-        H2PY_STRING_IS(name, "upgrade") {
-            if (self->request->upgrade.base == NULL) {
-                Py_RETURN_NONE;
-            } else {
-                return H2PY_STRING(self->request->upgrade);
-            }
-        }
-
-        H2PY_STRING_IS(name, "version") {
-            int major = self->request->version >> 8;
-            int minor = self->request->version & 0xFF;
-            return Py_BuildValue("(ii)", major, minor);
-        }
-
-        H2PY_STRING_IS(name, "payload") {
-            if (self->request->entity.base == NULL) {
-                Py_RETURN_NONE;
-            } else {
-                return PyBytes_FromStringAndSize(self->request->entity.base,
-                                       (ssize_t) self->request->entity.len);
-            }
-        }
-
-        H2PY_STRING_IS(name, "headers") {
-            Py_ssize_t i;
-            Py_ssize_t s = (ssize_t) self->request->headers.size;
-            h2o_header_t *src = self->request->headers.entries;
-            PyObject *ret = PyList_New(s);
-
-            if (ret == NULL) {
-                return NULL;
-            }
-
-            for (i = 0; i < s; ++i) {
-                PyObject *key = H2PY_STRING(src[i].name[0]);
-                PyObject *val = H2PY_STRING(src[i].value);
-                PyObject *pair = PyTuple_Pack(2, key, val);
-
-                Py_XDECREF(key);
-                Py_XDECREF(val);
-                if (pair == NULL) {
-                    while (i--) {
-                        Py_DECREF(PyList_GET_ITEM(ret, i));
-                    }
-
-                    return NULL;
-                }
-
-                PyList_SET_ITEM(ret, i, pair);
-            }
-
-            return ret;
-        }
-    }
-
-    return PyObject_GenericGetAttr((PyObject *) self, name);
+    return PyBytes_FromStringAndSize(self->request->entity.base, (ssize_t)self->request->entity.len);
 }
 
+
+static PyGetSetDef H2PyRequestGetSetters[] = {
+    { "method",  (getter) h2py_request_get_method,  NULL, NULL, NULL },
+    { "path",    (getter) h2py_request_get_path,    NULL, NULL, NULL },
+    { "host",    (getter) h2py_request_get_host,    NULL, NULL, NULL },
+    { "upgrade", (getter) h2py_request_get_upgrade, NULL, NULL, NULL },
+    { "version", (getter) h2py_request_get_version, NULL, NULL, NULL },
+    { "headers", (getter) h2py_request_get_headers, NULL, NULL, NULL },
+    { "payload", (getter) h2py_request_get_payload, NULL, NULL, NULL },
+    { NULL }
+};
 
 static PyMethodDef H2PyRequestMethods[] = {
     { "respond", (PyCFunction) h2py_request_respond, METH_VARARGS, NULL },
@@ -156,141 +155,57 @@ static PyMethodDef H2PyRequestMethods[] = {
 
 static PyTypeObject H2PyRequestType = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    "h2py.Request",            /* tp_name */
-    sizeof(H2PyRequest),       /* tp_basicsize */
-    0,                         /* tp_itemsize */
-    (destructor) h2py_request_dealloc, /* tp_dealloc */
-    0,                         /* tp_print */
-    0,                         /* tp_getattr */
-    0,                         /* tp_setattr */
-    0,                         /* tp_reserved */
-    0,                         /* tp_repr */
-    0,                         /* tp_as_number */
-    0,                         /* tp_as_sequence */
-    0,                         /* tp_as_mapping */
-    0,                         /* tp_hash  */
-    0,                         /* tp_call */
-    0,                         /* tp_str */
-    (getattrofunc) h2py_request_getattro, /* tp_getattro */
-    0,                         /* tp_setattro */
-    0,                         /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT,        /* tp_flags */
-    NULL,                      /* tp_doc */
-    0,                         /* tp_traverse */
-    0,                         /* tp_clear */
-    0,                         /* tp_richcompare */
-    0,                         /* tp_weaklistoffset */
-    0,                         /* tp_iter */
-    0,                         /* tp_iternext */
-    H2PyRequestMethods,        /* tp_methods */
-    0,                         /* tp_members */
-    0,                         /* tp_getset */
-    0,                         /* tp_base */
-    0,                         /* tp_dict */
-    0,                         /* tp_descr_get */
-    0,                         /* tp_descr_set */
-    0,                         /* tp_dictoffset */
-    0,                         /* tp_init */
-    0,                         /* tp_alloc */
-    0,                         /* tp_new */
+
+    .tp_name      = "h2py.Request",
+    .tp_basicsize = sizeof(H2PyRequest),
+    .tp_flags     = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc   = (destructor) h2py_request_dealloc,
+    .tp_methods   = H2PyRequestMethods,
+    .tp_getset    = H2PyRequestGetSetters,
 };
 
 
-static PyObject* h2py_server_close(H2PyServer *self) {
-    size_t i;
-
-    for (i = 0; i < self->server_cnt; ++i)
-    {
-        uv_close((uv_handle_t *) (self->servers + i), (uv_close_cb) PyMem_RawFree);
-    }
-
-    self->servers = NULL;
-    self->server_cnt = 0;
-    H2PY_RETURN(self);
-}
-
-
-static void h2py_server_dealloc(H2PyServer *self)
-{
-    size_t i;
-
-    for (i = 0; i < self->server_cnt; ++i) if (self->servers[i].data)
-    {
-        self->servers[i].data = NULL;
-        uv_close((uv_handle_t *) (self->servers + i), (uv_close_cb) PyMem_RawFree);
-    }
-
-    if (self->data) {
-        h2o_context_dispose(self->data->context);
-        h2o_config_dispose(self->data->config);
-        Py_DECREF(self->data->callback);
-        Py_DECREF(self->data->ssl);
-        PyMem_RawFree(self->data->config);
-        PyMem_RawFree(self->data->context);
-        PyMem_RawFree(self->data);
-    }
-
-    self->data = NULL;
-    self->servers = NULL;
-    self->server_cnt = 0;
-    Py_TYPE(self)->tp_free(self);
-}
-
-
-static void on_connect(uv_stream_t *server, int status)
+static void on_connect(uv_stream_t *listener, int status)
 {
     if (status != 0) return;
 
     uv_tcp_t *conn = PyMem_RawMalloc(sizeof(uv_tcp_t));
-    uv_tcp_init(server->loop, conn);
+    uv_tcp_init(listener->loop, conn);
 
-    if (uv_accept(server, (uv_stream_t *)conn) != 0) {
-        uv_close((uv_handle_t *)conn, (uv_close_cb)PyMem_RawFree);
-        return;
+    if (uv_accept(listener, (uv_stream_t *) conn) != 0) {
+        return uv_close((uv_handle_t *) conn, (uv_close_cb) PyMem_RawFree);
     }
 
-    h2py_data_t *extra = (h2py_data_t *) server->data;
-    h2o_context_t *ctx = extra->context;
-    h2o_socket_t *sock = h2o_uv_socket_create((uv_stream_t *)conn, NULL, 0, (uv_close_cb)PyMem_RawFree);
+    H2PyServer *server = (H2PyServer *) listener->data;
+    h2o_socket_t *sock = h2o_uv_socket_create((uv_stream_t *) conn, NULL, 0, (uv_close_cb) PyMem_RawFree);
 
-    if (extra->ssl && extra->ssl != Py_None)
-        h2o_accept_ssl(ctx, ctx->globalconf->hosts, sock, ((PySSLContext *) extra->ssl)->ctx);
+    if ((PyObject *) server->ssl != Py_None)
+        h2o_accept_ssl(&server->context, server->config.hosts, sock, server->ssl->ctx);
     else
-        h2o_http1_accept(ctx, ctx->globalconf->hosts, sock);
+        h2o_http1_accept(&server->context, server->config.hosts, sock);
 }
 
 
-static int on_request(h2o_handler_t *self_, h2o_req_t *req)
+static int on_request(h2o_handler_t *self, h2o_req_t *req)
 {
     PyGILState_STATE gstate = PyGILState_Ensure();
+    H2PyServer *server = ((h2py_handler_t *) self)->server;
+    PyObject *request = h2py_request_alloc(server, req);
+    PyObject *result  = NULL;
 
-    h2py_handler_ext_t *self = (h2py_handler_ext_t *)self_;
-    H2PyRequest *reqobj = PyObject_New(H2PyRequest, &H2PyRequestType);
-
-    if (reqobj == NULL) {
-        PyErr_Print();
-        PyErr_Clear();
-        PyGILState_Release(gstate);
-        return -1;
+    if (request != NULL) {
+        result = PyObject_CallFunctionObjArgs(server->callback, request, NULL);
     }
 
-    Py_INCREF(self->server);
-    reqobj->server  = self->server;
-    reqobj->request = req;
-    reqobj->started = 0;
-
-    PyObject *result = PyObject_CallFunctionObjArgs(self->callback, reqobj, NULL);
-
-    if (result == NULL) {
+    if (PyErr_Occurred()) {
+        // We're not sending an error response here since a task might have already been spawned.
+        // Nothing checks for an exception after this function returns, though; better print it.
         PyErr_Print();
         PyErr_Clear();
-        Py_DECREF(reqobj);
-        PyGILState_Release(gstate);
-        return reqobj->started - 1;
     }
 
-    Py_DECREF(result);
-    Py_DECREF(reqobj);
+    Py_XDECREF(result);
+    Py_XDECREF(request);
     PyGILState_Release(gstate);
     return 0;
 }
@@ -298,16 +213,12 @@ static int on_request(h2o_handler_t *self_, h2o_req_t *req)
 
 static PyObject * h2py_server_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
-    PyObject *sockets;
-    PyObject *ev;
-    PyObject *cb;
-    PyObject *ssl = Py_None;
-    Py_ssize_t i;
-    Py_ssize_t sz;
-    int backlog = 128;
-    int r;
+    PyObject *sockets, *callback;
+    PyUVLoop *uvloop;
+    PySSLContext *ssl;
+    int backlog;
 
-    if (!PyArg_ParseTuple(args, "OOO|Oi", &sockets, &ev, &cb, &ssl, &backlog)) {
+    if (!PyArg_ParseTuple(args, "OOOOi", &sockets, &callback, &uvloop, &ssl, &backlog)) {
         return NULL;
     }
 
@@ -317,88 +228,116 @@ static PyObject * h2py_server_new(PyTypeObject *type, PyObject *args, PyObject *
         return NULL;
     }
 
-    self->server_cnt = 0;
-    self->servers    = NULL;
-    self->data       = NULL;
+    // `PySSLContext` owns the `SSL_CTX` and will destroy it when GC'd.
+    // So we have to store a reference to the whole object.
+    Py_INCREF(ssl);
+    Py_INCREF(callback);
+    self->ssl               = ssl;
+    self->callback          = callback;
+    self->listeners.size    = 0;
+    self->listeners.entries = NULL;
 
-    sz = PyList_Size(sockets);
-    uv_tcp_t         *servers  = PyMem_RawMalloc(sizeof(uv_tcp_t) * sz);
-    h2py_data_t      *data     = PyMem_RawMalloc(sizeof(h2py_data_t));
-    h2o_context_t    *context  = PyMem_RawMalloc(sizeof(h2o_context_t));
-    h2o_globalconf_t *config   = PyMem_RawMalloc(sizeof(h2o_globalconf_t));
+    // NOTE Python code should ensure that `ev` is a `pyuv.Loop`.
+    //      And that `ssl` is either `None` or an `ssl.SSLContext`, for that matter.
+    uv_loop_t *loop = uvloop->uv_loop;
 
-    if (servers == NULL || data == NULL || context == NULL || config == NULL) {
-        PyMem_RawFree(servers);
-        PyMem_RawFree(context);
-        PyMem_RawFree(config);
-        PyMem_RawFree(data);
+    h2o_config_init(&self->config);
+    // FIXME in theory, `h2o_config_register_host` and `h2o_create_handler`
+    //       may return `NULL`.
+    h2o_pathconf_t *path = &h2o_config_register_host(&self->config, "default")->fallback_path;
+    h2py_handler_t *hndl = (h2py_handler_t *) h2o_create_handler(path, sizeof(h2py_handler_t));
+    // This must be done *after* registering a host for some reason.
+    h2o_context_init(&self->context, loop, &self->config);
+
+    hndl->u.on_req = on_request;
+    hndl->server   = self;
+
+    Py_ssize_t i;
+    Py_ssize_t sz = PyList_Size(sockets);
+    uv_tcp_t *listeners = PyMem_RawMalloc(sizeof(uv_tcp_t) * sz);
+
+    if (listeners == NULL) {
         PyErr_SetObject(PyExc_MemoryError, NULL);
         Py_DECREF(self);
         return NULL;
     }
 
-    Py_INCREF(cb);
-    Py_INCREF(ssl);
-
-    if (ssl != Py_None) {
-#if H2O_USE_ALPN
-        h2o_ssl_register_alpn_protocols(((PySSLContext *) ssl)->ctx, h2o_http2_alpn_protocols);
-#endif
-#if H2O_USE_NPN
-        h2o_ssl_register_npn_protocols(((PySSLContext *) ssl)->ctx, h2o_http2_npn_protocols);
-#endif
+    for (i = 0; i < sz; ++i) {
+        uv_tcp_init(loop, listeners + i);
     }
 
-    self->data = data;
-    self->data->config   = config;
-    self->data->context  = context;
-    self->data->callback = cb;
-    self->data->ssl      = ssl;
-    self->server_cnt = sz;
-    self->servers    = servers;
+    self->listeners.size    = sz;
+    self->listeners.entries = listeners;
 
-    uv_loop_t *loop = ((PyUV_Loop *)ev)->uv_loop;
+    for (i = 0; i < sz; ++i, ++listeners) {
+        size_t fd = PyLong_AsSize_t(PyList_GET_ITEM(sockets, i));
 
-    h2o_config_init(config);
-    h2o_hostconf_t *host = h2o_config_register_host(config, "default");
-    h2o_pathconf_t *path = h2o_config_register_path(host, "/");
-    h2py_handler_ext_t *h = (h2py_handler_ext_t *) h2o_create_handler(path, sizeof(h2py_handler_ext_t));
-    h2o_context_init(context, loop, config);
+        if (uv_tcp_open(listeners, fd)) {
+            Py_DECREF(self);
+            return PyErr_Format(PyExc_IOError, "could not reopen %lu", fd);
+        }
 
-    h->internal.on_req = on_request;
-    h->callback = cb;
-    h->server   = self;
-    h->ssl      = ssl;
+        listeners->data = (void *) self;
 
-    for (i = 0; i < sz; ++i) {
-        self->servers[i].data = NULL;
+        if (uv_listen((uv_stream_t *) listeners, backlog, on_connect)) {
+            Py_DECREF(self);
+            return PyErr_Format(PyExc_ConnectionError, "could not listen on %lu", fd);
+        }
     }
 
-    for (i = 0; i < sz; ++i) {
-        PyObject *socket = PyList_GET_ITEM(sockets, i);
-        uv_tcp_t *listener = self->servers + i;
-
-        if ((r = uv_tcp_init(loop, listener)) != 0) {
-            Py_DECREF(self);
-            return PyErr_Format(PyExc_ConnectionError, "could not create socket: %s", uv_strerror(r));
-        }
-
-        size_t fd = PyLong_AsSize_t(socket);
-
-        if ((r = uv_tcp_open(listener, fd)) != 0) {
-            Py_DECREF(self);
-            return PyErr_Format(PyExc_ConnectionError, "could not reopen fd %lu: %s", fd, uv_strerror(r));
-        }
-
-        listener->data = (void *) self->data;
-
-        if ((r = uv_listen((uv_stream_t *)listener, backlog, on_connect)) != 0) {
-            Py_DECREF(self);
-            return PyErr_Format(PyExc_ConnectionError, "could not listen on %lu: %s", fd, uv_strerror(r));
-        }
+    if ((PyObject *) ssl != Py_None) {
+        #if H2O_USE_ALPN
+            h2o_ssl_register_alpn_protocols(((PySSLContext *) ssl)->ctx, h2o_http2_alpn_protocols);
+        #endif
+        #if H2O_USE_NPN
+            h2o_ssl_register_npn_protocols(((PySSLContext *) ssl)->ctx, h2o_http2_npn_protocols);
+        #endif
     }
 
     return (PyObject *) self;
+}
+
+
+static void on_close(uv_handle_t * handle) {
+    // This is now a pointer to the array of handles, not the server.
+    // See below.
+    PyMem_RawFree(handle->data);
+}
+
+
+static PyObject* h2py_server_close(H2PyServer *self) {
+    uv_tcp_t *it  = self->listeners.entries;
+    uv_tcp_t *end = self->listeners.entries + self->listeners.size;
+    uv_close_cb on_close_ptr = on_close;
+
+    for (; it != end; ++it) if (it->data && !uv_is_closing((uv_handle_t *) it))
+    {
+        // While the actual file descriptor is closed synchronously,
+        // the handle itself is still held onto until the next iteration of the
+        // event loop, so we have to wait before freeing memory.
+        it->data = self->listeners.entries;
+        // Unfortunately, this method may get called from the destructor, in which
+        // case the `H2PyServer` instance will be deallocated when it returns,
+        // so we need to replace it with a pointer to the array of handles.
+        uv_close((uv_handle_t *) it, on_close_ptr);
+        // Deallocating the array once is enough.
+        on_close_ptr = NULL;
+    }
+
+    self->listeners.entries = NULL;
+    self->listeners.size    = 0;
+    Py_RETURN_NONE;
+}
+
+
+static void h2py_server_dealloc(H2PyServer *self)
+{
+    Py_DECREF(h2py_server_close(self));
+    h2o_context_dispose(&self->context);
+    h2o_config_dispose(&self->config);
+    Py_XDECREF(self->callback);
+    Py_XDECREF(self->ssl);
+    Py_TYPE(self)->tp_free(self);
 }
 
 
@@ -410,44 +349,13 @@ static PyMethodDef H2PyServerMethods[] = {
 
 static PyTypeObject H2PyServerType = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    "h2py.Server",             /* tp_name */
-    sizeof(H2PyServer),        /* tp_basicsize */
-    0,                         /* tp_itemsize */
-    (destructor) h2py_server_dealloc, /* tp_dealloc */
-    0,                         /* tp_print */
-    0,                         /* tp_getattr */
-    0,                         /* tp_setattr */
-    0,                         /* tp_reserved */
-    0,                         /* tp_repr */
-    0,                         /* tp_as_number */
-    0,                         /* tp_as_sequence */
-    0,                         /* tp_as_mapping */
-    0,                         /* tp_hash  */
-    0,                         /* tp_call */
-    0,                         /* tp_str */
-    0,                         /* tp_getattro */
-    0,                         /* tp_setattro */
-    0,                         /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT |
-    Py_TPFLAGS_BASETYPE,       /* tp_flags */
-    NULL,                      /* tp_doc */
-    0,                         /* tp_traverse */
-    0,                         /* tp_clear */
-    0,                         /* tp_richcompare */
-    0,                         /* tp_weaklistoffset */
-    0,                         /* tp_iter */
-    0,                         /* tp_iternext */
-    H2PyServerMethods,         /* tp_methods */
-    0,                         /* tp_members */
-    0,                         /* tp_getset */
-    0,                         /* tp_base */
-    0,                         /* tp_dict */
-    0,                         /* tp_descr_get */
-    0,                         /* tp_descr_set */
-    0,                         /* tp_dictoffset */
-    0,                         /* tp_init */
-    0,                         /* tp_alloc */
-    h2py_server_new,           /* tp_new */
+
+    .tp_name      = "h2py.Server",
+    .tp_basicsize = sizeof(H2PyServer),
+    .tp_flags     = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+    .tp_new       = (newfunc)    h2py_server_new,
+    .tp_dealloc   = (destructor) h2py_server_dealloc,
+    .tp_methods   = H2PyServerMethods,
 };
 
 

@@ -47,4 +47,4 @@ class Server (Server):
                 sock.setblocking(False)
                 _s.append(sock.detach())
 
-        return super(Server, cls).__new__(cls, _s, loop, callback, ssl, backlog)
+        return super(Server, cls).__new__(cls, _s, callback, loop, ssl, backlog)

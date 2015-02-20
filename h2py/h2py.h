@@ -1,5 +1,6 @@
-#ifndef _EXTERNAL_H_
-#define _EXTERNAL_H_
+#ifndef _H2PY_H_
+#define _H2PY_H_
+#define PY_SSIZE_T_CLEAN  // use Py_ssize_t, not int
 
 #include <Python.h>
 #include <uv.h>
@@ -19,7 +20,7 @@ typedef struct {
     PyObject *dict;
     uv_loop_t loop_struct;
     uv_loop_t *uv_loop;
-} PyUV_Loop;
+} PyUVLoop;
 
 
 typedef struct {
@@ -31,19 +32,12 @@ typedef struct {
 
 
 typedef struct {
-    // Data attached to a libuv stream.
-    h2o_context_t    *context;
-    h2o_globalconf_t *config;
-    PyObject *callback;
-    PyObject *ssl;
-} h2py_data_t;
-
-
-typedef struct {
     PyObject_HEAD
-    size_t    server_cnt;
-    uv_tcp_t *servers;
-    h2py_data_t *data;
+    H2O_VECTOR(uv_tcp_t) listeners;
+    h2o_context_t    context;
+    h2o_globalconf_t config;
+    PySSLContext *ssl;
+    PyObject *callback;
 } H2PyServer;
 
 
@@ -51,17 +45,17 @@ typedef struct {
     PyObject_HEAD
     H2PyServer *server;
     h2o_req_t  *request;
-    int started;
+    int handled;
 } H2PyRequest;
 
 
 typedef struct {
-    // An H2O handler with additional data.
-    h2o_handler_t internal;
-    H2PyServer *server;  // a `Server` instance
-    PyObject *callback;  // a function to call with a request
-    PyObject *ssl;       // and the SSL context to use
-} h2py_handler_ext_t;
+    h2o_handler_t u;
+    H2PyServer *server;
+} h2py_handler_t;
 
 
-#endif // _EXTERNAL_H
+static PyTypeObject H2PyRequestType;
+static PyTypeObject H2PyServerType;
+
+#endif // _H2PY_H_
