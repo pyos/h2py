@@ -153,14 +153,39 @@ static PyObject * h2py_request_get_headers(H2PyRequest *self, void *closure)
 }
 
 
+static PyObject * h2py_request_get_requests(H2PyRequest *self, void *closure)
+{
+    H2PY_ENSURE_REQUEST_USABLE(self);
+
+    Py_ssize_t i;
+    Py_ssize_t s = self->request->http2_push_paths.size;
+    PyObject *ret = PyList_New(s);
+    h2o_iovec_t *src = self->request->http2_push_paths.entries;
+
+    if (ret != NULL) for (i = 0; i < s; ++i, ++src) {
+        PyObject *path = Py_BuildValue("s#s#", src->base, src->len);
+
+        if (path == NULL) {
+            Py_DECREF(ret);
+            return NULL;
+        }
+
+        PyList_SET_ITEM(ret, i, path);
+    }
+
+    return ret;
+}
+
+
 static PyGetSetDef H2PyRequestGetSetters[] = {
-    { "method",  (getter) h2py_request_get_method,  NULL, NULL, NULL },
-    { "path",    (getter) h2py_request_get_path,    NULL, NULL, NULL },
-    { "host",    (getter) h2py_request_get_host,    NULL, NULL, NULL },
-    { "upgrade", (getter) h2py_request_get_upgrade, NULL, NULL, NULL },
-    { "version", (getter) h2py_request_get_version, NULL, NULL, NULL },
-    { "headers", (getter) h2py_request_get_headers, NULL, NULL, NULL },
-    { "payload", (getter) h2py_request_get_payload, NULL, NULL, NULL },
+    { "method",   (getter) h2py_request_get_method,   NULL, NULL, NULL },
+    { "path",     (getter) h2py_request_get_path,     NULL, NULL, NULL },
+    { "host",     (getter) h2py_request_get_host,     NULL, NULL, NULL },
+    { "upgrade",  (getter) h2py_request_get_upgrade,  NULL, NULL, NULL },
+    { "version",  (getter) h2py_request_get_version,  NULL, NULL, NULL },
+    { "headers",  (getter) h2py_request_get_headers,  NULL, NULL, NULL },
+    { "payload",  (getter) h2py_request_get_payload,  NULL, NULL, NULL },
+    { "requests", (getter) h2py_request_get_requests, NULL, NULL, NULL },
     { NULL }
 };
 
