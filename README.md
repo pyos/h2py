@@ -11,6 +11,24 @@ Python bindings for [libh2o](https://github.com/h2o/h2o).
 
 ### Usage
 
+Ha-ha! Thought it's so easy? Nope, let's compile pyuv first.
+
+### Compilation
+
+ 1. Download, build, and install libuv **v1.x**. (Note that the one in the Ubuntu repos is 0.10.)
+ 2. Fetch pyuv.
+ 3. Run `python setup build_ext --use-system-libuv build`
+ 4. Move the contents of `build/lib.*` somewhere to `PYTHONPATH`.
+    And no, you can't use pip! See that `--use-system-libuv` there? Without it, pyuv would
+    link against a separate copy of the library.
+ 5. Now, do `pip install git+https://github.com/saghul/aiouv`. It's not on PyPI.
+ 6. Build and install h2o. Hold on, you built it as a static library and your libpython is shared?
+ 7. Edit `CMakeLists.txt` of h2o. Change `ADD_LIBRARY(libh2o STATIC ...)` to
+    `ADD_LIBRARY(libh2o SHARED ...)`. Do step 6 again.
+ 8. Finally, you can install this with pip or by running `python setup.py install`. Yay!
+
+### Usage
+
 ```python
 import socket
 
@@ -50,7 +68,13 @@ def onrequest(req, loop=None):
 srv = h2py.Server([sock], onrequest, loop)
 
 try:
+    # XXX aiouv was kinda broken at the time this README was written.
+    loop._running = False
     loop.run_forever()
 finally:
     srv.close()
+    # Run the loop for some more time to allow the event loop
+    # to close all file descriptors.
+    loop.call_later(1, loop.stop)
+    loop.run_forever()
 ```
