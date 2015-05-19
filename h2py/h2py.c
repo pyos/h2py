@@ -286,7 +286,7 @@ static PyObject * h2py_server_new(PyTypeObject *type, PyObject *args, PyObject *
     h2o_config_init(&self->config);
     // FIXME in theory, `h2o_config_register_host` and `h2o_create_handler`
     //       may return `NULL`.
-    h2o_pathconf_t *path = &h2o_config_register_host(&self->config, "default")->fallback_path;
+    h2o_pathconf_t *path = &h2o_config_register_host(&self->config, h2o_iovec_init(H2O_STRLIT("default")), 65535)->fallback_path;
     h2py_handler_t *hndl = (h2py_handler_t *) h2o_create_handler(path, sizeof(h2py_handler_t));
     // This must be done *after* registering a host for some reason.
     h2o_context_init(&self->context, loop, &self->config);
