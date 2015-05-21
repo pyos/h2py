@@ -22,10 +22,8 @@ Ha-ha! Thought it's so easy? Nope, let's compile pyuv first.
     And no, you can't use pip! See that `--use-system-libuv` there? Without it, pyuv would
     link against a separate copy of the library.
  5. Now, do `pip install git+https://github.com/saghul/aiouv`. It's not on PyPI.
- 6. Build and install h2o. Hold on, you built it as a static library and your libpython is shared?
- 7. Edit `CMakeLists.txt` of h2o. Change `ADD_LIBRARY(libh2o STATIC ...)` to
-    `ADD_LIBRARY(libh2o SHARED ...)`. Do step 6 again.
- 8. Finally, you can install this with pip or by running `python setup.py install`. Yay!
+ 6. Build and install h2o as a shared library (`cmake -DBUILD_SHARED_LIBS=ON`)
+ 7. Finally, you can install this with pip or by running `python setup.py install`. Yay!
 
 ### Usage
 
@@ -68,8 +66,6 @@ def onrequest(req, loop=None):
 srv = h2py.Server([sock], onrequest, loop)
 
 try:
-    # XXX aiouv was kinda broken at the time this README was written.
-    loop._running = False
     loop.run_forever()
 finally:
     srv.close()
